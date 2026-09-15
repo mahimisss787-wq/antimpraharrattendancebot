@@ -54,6 +54,11 @@ def get_gspread_client():
             except Exception as err:
                 logger.error(f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {err}")
                 raise err
+
+        # Fix private_key newlines if escaped in environment variable
+        if "private_key" in creds_dict and isinstance(creds_dict["private_key"], str):
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     elif os.path.exists(SERVICE_ACCOUNT_FILE):
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
@@ -77,6 +82,24 @@ def get_members_sheet():
     except Exception:
         # Fallback to second sheet if name is different
         return doc.get_worksheet(1)
+
+def get_records_safely(worksheet):
+    try:
+        return worksheet.get_all_records()
+    except Exception as e:
+        logger.warning(f"get_all_records fallback triggered: {e}")
+        rows = worksheet.get_all_values()
+        if not rows:
+            return []
+        headers = [str(h).strip() for h in rows[0]]
+        records = []
+        for row in rows[1:]:
+            record = {}
+            for i, h in enumerate(headers):
+                if h:
+                    record[h] = row[i] if i < len(row) else ""
+            records.append(record)
+        return records
 
 # Helper functions to normalize column lookups (matches n8n logic)
 def find_user_id(row: dict) -> str:
@@ -133,7 +156,7 @@ async def job_morning_announcement(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=CHAT_ID, text=msg)
         logger.info("Sent morning attendance announcement.")
     except Exception as e:
-        logger.error(f"Error sending morning announcement: {e}")
+        logger.error(f"Error sending morning announcement: {e}", exc_info=True)
 
 # 2. 09:00 PM Daily Report
 def chunk_list(users: list, chunk_type: str) -> list[str]:
@@ -194,7 +217,7 @@ async def job_night_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         # Fetch members
         members_sheet = get_members_sheet()
-        raw_members = members_sheet.get_all_records()
+        raw_members = get_records_safely(members_sheet)
         unique_members_map = {}
         for m in raw_members:
             u_id = find_user_id(m)
@@ -209,7 +232,7 @@ async def job_night_report(context: ContextTypes.DEFAULT_TYPE):
 
         # Fetch attendance
         att_sheet = get_attendance_sheet()
-        raw_att = att_sheet.get_all_records()
+        raw_att = get_records_safely(att_sheet)
         unique_att_map = {}
         for a in raw_att:
             u_id = find_user_id(a)
@@ -305,7 +328,7 @@ async def job_night_report(context: ContextTypes.DEFAULT_TYPE):
 
         logger.info("Successfully sent 9 PM report.")
     except Exception as e:
-        logger.error(f"Error generating 9 PM report: {e}")
+        logger.error(f"Error generating 9 PM report: {e}", exc_info=True)
 
 
 # ----------------- COMMAND HANDLERS ----------------- #
@@ -321,10 +344,12 @@ async def handle_admission_form(update: Update, context: ContextTypes.DEFAULT_TY
 
 # 2. /mystatus
 async def handle_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    user = update.effective_user or update.effective_chat
     chat = update.effective_chat
+    if not user:
+        return
     user_id = str(user.id).strip()
-    name = escape_html(user.first_name or 'Unknown')
+    name = escape_html(getattr(user, 'first_name', None) or getattr(user, 'title', None) or 'Unknown')
     user_msg_id = update.message.message_id
 
     # Delete user command immediately
@@ -332,7 +357,7 @@ async def handle_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         att_sheet = get_attendance_sheet()
-        all_rows = att_sheet.get_all_records()
+        all_rows = get_records_safely(att_sheet)
         user_rows = [r for r in all_rows if find_user_id(r) == user_id]
 
         present_count = sum(
@@ -386,7 +411,7 @@ async def handle_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(delete_message_later(context.bot, chat.id, sent_msg.message_id, 60))
 
     except Exception as e:
-        logger.error(f"Error handling /mystatus: {e}")
+        logger.error(f"Error handling /mystatus: {e}", exc_info=True)
 
 # 3. /present & /leave
 async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -403,10 +428,15 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_ist = datetime.now(IST)
     hour = now_ist.hour
     date_str = now_ist.strftime("%d-%m-%Y")
-    user = msg.from_user
+    
+    # Extract user safely (handles anonymous admins / channels)
+    user = msg.from_user or msg.sender_chat
+    if not user:
+        return
+        
     user_id = str(user.id).strip()
-    name = user.first_name or "Unknown"
-    username = user.username or ""
+    name = getattr(user, 'first_name', None) or getattr(user, 'title', None) or "Unknown"
+    username = getattr(user, 'username', '') or ""
 
     user_msg_id = msg.message_id
 
@@ -434,7 +464,7 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         att_sheet = get_attendance_sheet()
-        all_rows = att_sheet.get_all_records()
+        all_rows = get_records_safely(att_sheet)
 
         # Check duplicate for today
         already = next(
@@ -503,8 +533,9 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(delete_message_later(context.bot, chat.id, sent_msg.message_id, 30))
 
     except Exception as e:
-        logger.error(f"Error recording attendance: {e}")
+        logger.error(f"Error recording attendance: {e}", exc_info=True)
         await msg.reply_text("⚠️ An error occurred while processing attendance.")
+
 
 async def post_init(application):
     try:
