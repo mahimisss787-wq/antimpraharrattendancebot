@@ -71,8 +71,10 @@ def get_gspread_client():
 def get_attendance_sheet():
     gc = get_gspread_client()
     doc = gc.open_by_key(SHEET_ID)
-    # Sheet 1 or 'Admissions' (gid=0)
-    return doc.get_worksheet(0)
+    try:
+        return doc.worksheet("Admissions")
+    except Exception:
+        return doc.get_worksheet(0)
 
 def get_members_sheet():
     gc = get_gspread_client()
@@ -534,7 +536,16 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error recording attendance: {e}", exc_info=True)
-        await msg.reply_text("⚠️ An error occurred while processing attendance.")
+        err_str = str(e)
+        if "404" in err_str or "SpreadsheetNotFound" in err_str:
+            hint = "Spreadsheet not found or not shared with Service Account!"
+        elif "403" in err_str or "PERMISSION_DENIED" in err_str:
+            hint = "Permission denied! Make sure Service Account email has Editor access to Google Sheet."
+        elif "credentials" in err_str.lower() or "service account" in err_str.lower():
+            hint = "Google Service Account credentials missing or invalid in Railway variables."
+        else:
+            hint = f"Error: {e}"
+        await msg.reply_text(f"⚠️ Attendance Error: {hint}")
 
 
 async def post_init(application):
