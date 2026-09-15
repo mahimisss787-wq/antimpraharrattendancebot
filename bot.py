@@ -1,10 +1,11 @@
 import os
 import json
+import base64
 import re
 import html
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
@@ -42,7 +43,17 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive",
     ]
     if SERVICE_ACCOUNT_JSON:
-        creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
+        raw_json = SERVICE_ACCOUNT_JSON.strip()
+        try:
+            creds_dict = json.loads(raw_json)
+        except Exception:
+            # Try decoding base64 if user base64-encoded their credentials
+            try:
+                decoded = base64.b64decode(raw_json).decode("utf-8")
+                creds_dict = json.loads(decoded)
+            except Exception as err:
+                logger.error(f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {err}")
+                raise err
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     elif os.path.exists(SERVICE_ACCOUNT_FILE):
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
@@ -495,9 +506,16 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error recording attendance: {e}")
         await msg.reply_text("⚠️ An error occurred while processing attendance.")
 
+async def post_init(application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Cleared existing Telegram webhooks.")
+    except Exception as e:
+        logger.warning(f"Could not clear webhook: {e}")
+
 # Main function
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Job Queue for scheduled crons
     job_queue = app.job_queue
@@ -505,17 +523,15 @@ def main():
     # 06:00 AM IST daily (06:00)
     job_queue.run_daily(
         job_morning_announcement,
-        time=datetime.strptime("06:00", "%H:%M").time(),
+        time=time(6, 0, tzinfo=IST),
         days=(0, 1, 2, 3, 4, 5, 6),
-        tz=IST
     )
 
     # 21:00 PM IST daily (21:00)
     job_queue.run_daily(
         job_night_report,
-        time=datetime.strptime("21:00", "%H:%M").time(),
+        time=time(21, 0, tzinfo=IST),
         days=(0, 1, 2, 3, 4, 5, 6),
-        tz=IST
     )
 
     # Handlers
@@ -532,3 +548,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
