@@ -1,14 +1,13 @@
 import os
 import json
-import base64
 import re
 import html
 import logging
 import asyncio
+import urllib.request
+import urllib.parse
 from datetime import datetime, time, timedelta
 import pytz
-import gspread
-from google.oauth2.service_account import Credentials
 
 from telegram import Update
 from telegram.ext import (
@@ -32,76 +31,64 @@ IST = pytz.timezone("Asia/Kolkata")
 # Environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8974478810:AAEgxD-ikJrMwV_JSBJY9F45ppBhefoZjtg")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003493006883")
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "123XUsCdQRMTt_HtcHclEE8RRoFYoAl27KDBi1Ealn3E")
-SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
+GOOGLE_SCRIPT_URL = os.getenv(
+    "GOOGLE_SCRIPT_URL",
+    "https://script.google.com/macros/s/AKfycbzoS8NNwG2XyG-k6N19CHPzsZVb4mD9EJ9VFZoTxAFv_h-g2IpGNz6USFkrncQG2jmD/exec"
+)
 
-# Google Sheets Auth Helper
-def get_gspread_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    if SERVICE_ACCOUNT_JSON:
-        raw_json = SERVICE_ACCOUNT_JSON.strip()
-        try:
-            creds_dict = json.loads(raw_json)
-        except Exception:
-            # Try decoding base64 if user base64-encoded their credentials
-            try:
-                decoded = base64.b64decode(raw_json).decode("utf-8")
-                creds_dict = json.loads(decoded)
-            except Exception as err:
-                logger.error(f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {err}")
-                raise err
+# ----------------- GOOGLE APPS SCRIPT API HELPERS ----------------- #
 
-        # Fix private_key newlines if escaped in environment variable
-        if "private_key" in creds_dict and isinstance(creds_dict["private_key"], str):
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+def get_attendance_records():
+    req = urllib.request.Request(GOOGLE_SCRIPT_URL)
+    with urllib.request.urlopen(req) as response:
+        raw_data = json.loads(response.read().decode('utf-8'))
+    if not raw_data:
+        return []
+    headers = [str(h).strip() for h in raw_data[0]]
+    records = []
+    for row in raw_data[1:]:
+        record = {}
+        for i, h in enumerate(headers):
+            if h:
+                record[h] = row[i] if i < len(row) else ""
+        records.append(record)
+    return records
 
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    elif os.path.exists(SERVICE_ACCOUNT_FILE):
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-    else:
-        raise ValueError(
-            "Google Service Account credentials not found! Set GOOGLE_SERVICE_ACCOUNT_JSON env variable or place service_account.json file."
-        )
-    return gspread.authorize(creds)
+def get_members_records():
+    url = f"{GOOGLE_SCRIPT_URL}?action=get_members"
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req) as response:
+        raw_data = json.loads(response.read().decode('utf-8'))
+    if not raw_data:
+        return []
+    headers = [str(h).strip() for h in raw_data[0]]
+    records = []
+    for row in raw_data[1:]:
+        record = {}
+        for i, h in enumerate(headers):
+            if h:
+                record[h] = row[i] if i < len(row) else ""
+        records.append(record)
+    return records
 
-def get_attendance_sheet():
-    gc = get_gspread_client()
-    doc = gc.open_by_key(SHEET_ID)
-    try:
-        return doc.worksheet("Admissions")
-    except Exception:
-        return doc.get_worksheet(0)
-
-def get_members_sheet():
-    gc = get_gspread_client()
-    doc = gc.open_by_key(SHEET_ID)
-    try:
-        return doc.worksheet("Members")
-    except Exception:
-        # Fallback to second sheet if name is different
-        return doc.get_worksheet(1)
-
-def get_records_safely(worksheet):
-    try:
-        return worksheet.get_all_records()
-    except Exception as e:
-        logger.warning(f"get_all_records fallback triggered: {e}")
-        rows = worksheet.get_all_values()
-        if not rows:
-            return []
-        headers = [str(h).strip() for h in rows[0]]
-        records = []
-        for row in rows[1:]:
-            record = {}
-            for i, h in enumerate(headers):
-                if h:
-                    record[h] = row[i] if i < len(row) else ""
-            records.append(record)
-        return records
+def append_attendance_record(date_str: str, user_id: str, name: str, username: str, status: str, reason: str):
+    payload = json.dumps({
+        "date": date_str,
+        "userId": user_id,
+        "name": name,
+        "username": username,
+        "status": status,
+        "reason": reason
+    }).encode("utf-8")
+    
+    req = urllib.request.Request(
+        GOOGLE_SCRIPT_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 # Helper functions to normalize column lookups (matches n8n logic)
 def find_user_id(row: dict) -> str:
@@ -217,9 +204,8 @@ async def job_night_report(context: ContextTypes.DEFAULT_TYPE):
     day_before = (now_ist - timedelta(days=2)).strftime("%d-%m-%Y")
 
     try:
-        # Fetch members
-        members_sheet = get_members_sheet()
-        raw_members = get_records_safely(members_sheet)
+        # Fetch members via Apps Script
+        raw_members = get_members_records()
         unique_members_map = {}
         for m in raw_members:
             u_id = find_user_id(m)
@@ -232,17 +218,8 @@ async def job_night_report(context: ContextTypes.DEFAULT_TYPE):
         members = list(unique_members_map.values())
         total_members_count = len(members)
 
-        # Fetch attendance
-        att_sheet = get_attendance_sheet()
-        raw_att = get_records_safely(att_sheet)
-        unique_att_map = {}
-        for a in raw_att:
-            u_id = find_user_id(a)
-            date_str = str(a.get('Date') or a.get('date') or '').strip()
-            key = f"{u_id}_{date_str}"
-            if u_id and date_str and key not in unique_att_map:
-                unique_att_map[key] = a
-        attendance = list(unique_att_map.values())
+        # Fetch attendance via Apps Script
+        attendance = get_attendance_records()
 
         # Today's attendance filter
         today_attendance = [
@@ -358,8 +335,7 @@ async def handle_my_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(delete_message_later(context.bot, chat.id, user_msg_id, 0))
 
     try:
-        att_sheet = get_attendance_sheet()
-        all_rows = get_records_safely(att_sheet)
+        all_rows = get_attendance_records()
         user_rows = [r for r in all_rows if find_user_id(r) == user_id]
 
         present_count = sum(
@@ -465,8 +441,7 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "No reason specified"
 
     try:
-        att_sheet = get_attendance_sheet()
-        all_rows = get_records_safely(att_sheet)
+        all_rows = get_attendance_records()
 
         # Check duplicate for today
         already = next(
@@ -522,9 +497,8 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             reply_text = f"<b>🍂 {escape_html(name)}, leave registered</b>"
 
-        # Append row to Google Sheets
-        row_data = [date_str, user_id, name, username, status, reason]
-        att_sheet.append_row(row_data)
+        # Append row via Apps Script Web App
+        append_attendance_record(date_str, user_id, name, username, status, reason)
 
         # Send confirmation message
         sent_msg = await msg.reply_text(reply_text, parse_mode="HTML")
@@ -536,17 +510,7 @@ async def handle_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error recording attendance: {e}", exc_info=True)
-        err_str = str(e)
-        if "404" in err_str or "SpreadsheetNotFound" in err_str:
-            hint = "Spreadsheet not found or not shared with Service Account!"
-        elif "403" in err_str or "PERMISSION_DENIED" in err_str:
-            hint = "Permission denied! Make sure Service Account email has Editor access to Google Sheet."
-        elif "credentials" in err_str.lower() or "service account" in err_str.lower():
-            hint = "Google Service Account credentials missing or invalid in Railway variables."
-        else:
-            hint = f"Error: {e}"
-        await msg.reply_text(f"⚠️ Attendance Error: {hint}")
-
+        await msg.reply_text(f"⚠️ Attendance Error: {e}")
 
 async def post_init(application):
     try:
@@ -590,4 +554,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
