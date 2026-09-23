@@ -1,4 +1,5 @@
-python-telegram-bot[job-queue]==20.8
-pytz==2024.1
-httpx==0.27.0
-python-dotenv==1.0.1
+TELEGRAM_BOT_TOKEN=8974478810:AAF-bDSFAVClkpScR5LldpcXw8Kz-58xq4Y
+TELEGRAM_CHAT_ID=-1003493006883
+GOOGLE_SCRIPT_URL=https://script.google.com/macros/s/AKfycbxqacWU1NM-H0CDFk9TGcogshzLOLvkiOYynsZkgY8VzLUPqKj4uZOi5bYQZuZ4idC7/exec
+ATTENDANCE_START_HOUR=6
+ATTENDANCE_END_HOUR=21
